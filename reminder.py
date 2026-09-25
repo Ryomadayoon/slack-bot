@@ -114,7 +114,8 @@ def slack_users(client: WebClient):
 
 def resolve_mentions(client: WebClient, row: dict) -> str:
     users = slack_users(client)
-    by_name = {}
+    name_entries = []
+    exact = {}
     for user in users:
         if user.get("deleted") or user.get("is_bot"):
             continue
@@ -125,21 +126,51 @@ def resolve_mentions(client: WebClient, row: dict) -> str:
             profile.get("display_name", ""),
             profile.get("real_name", ""),
         }
-        for name in names:
-            if name:
-                by_name[normalize_name(name)] = user["id"]
+        normalized_names = {normalize_name(name) for name in names if name}
+        if not normalized_names:
+            continue
+        entry = (user["id"], names)
+        name_entries.append((user["id"], names, normalized_names))
+        for normalized in normalized_names:
+            exact.setdefault(normalized, set()).add(user["id"])
 
     mentions = []
     unresolved = []
+    ambiguous = []
     for header in MEMBER_HEADERS:
-        name = row.get(header, "").strip()
-        if not name:
+        sheet_name = row.get(header, "").strip()
+        if not sheet_name:
             continue
-        user_id = by_name.get(normalize_name(name))
+        normalized_sheet_name = normalize_name(sheet_name)
+        exact_matches = exact.get(normalized_sheet_name, set())
+        if len(exact_matches) == 1:
+            user_id = next(iter(exact_matches))
+        else:
+            fuzzy_matches = []
+            for user_id, names, normalized_names in name_entries:
+                if any(
+                    normalized_sheet_name in candidate
+                    or candidate in normalized_sheet_name
+                    for candidate in normalized_names
+                ):
+                    fuzzy_matches.append((user_id, names))
+            unique_ids = {user_id for user_id, _ in fuzzy_matches}
+            if len(unique_ids) == 1:
+                user_id = next(iter(unique_ids))
+            elif len(unique_ids) > 1:
+                user_id = None
+                ambiguous.append(sheet_name)
+            else:
+                user_id = None
         if user_id:
             mentions.append(f"<@{user_id}>")
-        else:
-            unresolved.append(name)
+        elif sheet_name not in ambiguous:
+            unresolved.append(sheet_name)
+
+    if ambiguous:
+        raise RuntimeError(
+            f"Slack user mapping is ambiguous for sheet name(s): {', '.join(ambiguous)}"
+        )
     if unresolved:
         raise RuntimeError(f"Slack user not found for sheet name(s): {', '.join(unresolved)}")
     if not mentions:
