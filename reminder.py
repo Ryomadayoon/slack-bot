@@ -12,7 +12,6 @@ from slack_sdk.errors import SlackApiError
 
 JST = ZoneInfo("Asia/Tokyo")
 SHEETS_SCOPE = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-DATE_HEADERS = ("日程", "日付")
 MEMBER_HEADERS = ("担当1", "担当2", "担当3")
 
 
@@ -60,20 +59,26 @@ def load_rows(service, spreadsheet_id: str, sheet_name: str):
     if not values:
         raise RuntimeError(f"Sheet '{sheet_name}' is empty")
 
-    headers = [cell.strip() for cell in values[0]]
-    date_index = next((headers.index(header) for header in DATE_HEADERS if header in headers), None)
-    missing = [header for header in MEMBER_HEADERS if header not in headers]
-    if date_index is None or missing:
-        raise RuntimeError(
-            f"Sheet '{sheet_name}' must have 日程 and 担当1, 担当2, 担当3 columns"
-        )
-
     rows = []
     for raw in values[1:]:
-        row = {headers[index]: raw[index].strip() if index < len(raw) else "" for index in range(len(headers))}
-        if row.get(headers[date_index], ""):
-            row["_date"] = parse_date(row[headers[date_index]])
-            rows.append(row)
+        # The sheet layout is fixed: A=日程, B=曜日, C〜E=担当1〜3, F=鍵預かり当番.
+        if not raw or not raw[0].strip():
+            continue
+        try:
+            duty_date = parse_date(raw[0])
+        except RuntimeError:
+            # Ignore a title/header row if the sheet contains one.
+            continue
+        rows.append(
+            {
+                "日程": raw[0].strip(),
+                "担当1": raw[2].strip() if len(raw) > 2 else "",
+                "担当2": raw[3].strip() if len(raw) > 3 else "",
+                "担当3": raw[4].strip() if len(raw) > 4 else "",
+                "鍵預かり当番": raw[5].strip() if len(raw) > 5 else "",
+                "_date": duty_date,
+            }
+        )
     return rows
 
 
