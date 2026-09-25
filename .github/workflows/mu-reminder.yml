@@ -19,9 +19,6 @@ on:
 jobs:
   remind:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: mu-slack-reminder
     env:
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
       SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
