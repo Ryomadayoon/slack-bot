@@ -13,6 +13,7 @@ from slack_sdk.errors import SlackApiError
 JST = ZoneInfo("Asia/Tokyo")
 SHEETS_SCOPE = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 MEMBER_HEADERS = ("担当1", "担当2", "担当3")
+IGNORED_SHEET_NAMES = {"マヌエル", "マヌエル・澤地"}
 
 
 def required_env(name: str) -> str:
@@ -139,7 +140,9 @@ def resolve_mentions(client: WebClient, row: dict) -> str:
     ambiguous = []
     for header in MEMBER_HEADERS:
         sheet_name = row.get(header, "").strip()
-        if not sheet_name:
+        if not sheet_name or normalize_name(sheet_name) in {
+            normalize_name(value) for value in IGNORED_SHEET_NAMES
+        }:
             continue
         normalized_sheet_name = normalize_name(sheet_name)
         exact_matches = exact.get(normalized_sheet_name, set())
