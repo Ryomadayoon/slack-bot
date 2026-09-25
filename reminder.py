@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -10,8 +11,9 @@ from slack_sdk.errors import SlackApiError
 
 
 JST = ZoneInfo("Asia/Tokyo")
-SHEETS_SCOPE = ["https://www.googleapis.com/auth/spreadsheets"]
-HEADERS = ["date", "member1_slack_id", "member2_slack_id", "mu_date", "posted_at"]
+SHEETS_SCOPE = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+DATE_HEADERS = ("日程", "日付")
+MEMBER_HEADERS = ("担当1", "担当2", "担当3")
 
 
 def required_env(name: str) -> str:
@@ -21,14 +23,28 @@ def required_env(name: str) -> str:
     return value
 
 
-def target_date() -> str:
-    return os.environ.get("RUN_DATE", "").strip() or datetime.now(JST).date().isoformat()
+def run_date() -> date:
+    value = os.environ.get("RUN_DATE", "").strip()
+    if value:
+        return parse_date(value)
+    return datetime.now(JST).date()
+
+
+def parse_date(value: str) -> date:
+    match = re.search(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", value.strip())
+    if not match:
+        raise RuntimeError(f"Could not parse date: {value}")
+    return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+
+def display_date(value: date) -> str:
+    weekday = "月火水木金土日"[value.weekday()]
+    return f"{value.year}/{value.month}/{value.day}（{weekday}）"
 
 
 def sheets_service():
-    credentials_json = required_env("GOOGLE_SERVICE_ACCOUNT_JSON")
     credentials = service_account.Credentials.from_service_account_info(
-        json.loads(credentials_json), scopes=SHEETS_SCOPE
+        json.loads(required_env("GOOGLE_SERVICE_ACCOUNT_JSON")), scopes=SHEETS_SCOPE
     )
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
@@ -37,48 +53,94 @@ def load_rows(service, spreadsheet_id: str, sheet_name: str):
     result = (
         service.spreadsheets()
         .values()
-        .get(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A:E")
+        .get(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A:F")
         .execute()
     )
     values = result.get("values", [])
     if not values:
         raise RuntimeError(f"Sheet '{sheet_name}' is empty")
 
-    headers = values[0]
-    missing = [header for header in HEADERS if header not in headers]
-    if missing:
-        raise RuntimeError(f"Missing columns in '{sheet_name}': {', '.join(missing)}")
+    headers = [cell.strip() for cell in values[0]]
+    date_index = next((headers.index(header) for header in DATE_HEADERS if header in headers), None)
+    missing = [header for header in MEMBER_HEADERS if header not in headers]
+    if date_index is None or missing:
+        raise RuntimeError(
+            f"Sheet '{sheet_name}' must have 日程 and 担当1, 担当2, 担当3 columns"
+        )
 
     rows = []
-    for row_number, raw in enumerate(values[1:], start=2):
-        row = {header: raw[index].strip() if index < len(raw) else "" for index, header in enumerate(headers)}
-        row["_row_number"] = row_number
-        if row.get("date"):
+    for raw in values[1:]:
+        row = {headers[index]: raw[index].strip() if index < len(raw) else "" for index in range(len(headers))}
+        if row.get(headers[date_index], ""):
+            row["_date"] = parse_date(row[headers[date_index]])
             rows.append(row)
     return rows
 
 
-def update_posted_at(service, spreadsheet_id: str, sheet_name: str, row_number: int):
-    timestamp = datetime.now(JST).isoformat(timespec="seconds")
-    service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id,
-        range=f"'{sheet_name}'!E{row_number}",
-        valueInputOption="RAW",
-        body={"values": [[timestamp]]},
-    ).execute()
+def find_next_duty(rows, today: date):
+    candidates = [row for row in rows if row["_date"] > today]
+    if not candidates:
+        raise RuntimeError(f"No future duty date found after {today.isoformat()}")
+    return min(candidates, key=lambda row: row["_date"])
 
 
-def build_message(row: dict) -> str:
-    member_ids = [row.get("member1_slack_id", ""), row.get("member2_slack_id", "")]
-    member_ids = [member_id for member_id in member_ids if member_id]
-    if not member_ids:
-        raise RuntimeError(f"No Slack member IDs in row {row['_row_number']}")
+def normalize_name(value: str) -> str:
+    return re.sub(r"[\s　]+", "", value).casefold()
 
-    mentions = " ".join(f"<@{member_id}>" for member_id in member_ids)
-    mu_date = row.get("mu_date") or row["date"]
+
+def slack_users(client: WebClient):
+    users = []
+    cursor = None
+    while True:
+        response = client.users_list(cursor=cursor) if cursor else client.users_list()
+        users.extend(response.get("members", []))
+        cursor = response.get("response_metadata", {}).get("next_cursor") or None
+        if not cursor:
+            break
+    return users
+
+
+def resolve_mentions(client: WebClient, row: dict) -> str:
+    users = slack_users(client)
+    by_name = {}
+    for user in users:
+        if user.get("deleted") or user.get("is_bot"):
+            continue
+        profile = user.get("profile", {})
+        names = {
+            user.get("name", ""),
+            user.get("real_name", ""),
+            profile.get("display_name", ""),
+            profile.get("real_name", ""),
+        }
+        for name in names:
+            if name:
+                by_name[normalize_name(name)] = user["id"]
+
+    mentions = []
+    unresolved = []
+    for header in MEMBER_HEADERS:
+        name = row.get(header, "").strip()
+        if not name:
+            continue
+        user_id = by_name.get(normalize_name(name))
+        if user_id:
+            mentions.append(f"<@{user_id}>")
+        else:
+            unresolved.append(name)
+    if unresolved:
+        raise RuntimeError(f"Slack user not found for sheet name(s): {', '.join(unresolved)}")
+    if not mentions:
+        raise RuntimeError("No names found in 担当1, 担当2, 担当3")
+    return " ".join(mentions)
+
+
+def build_message(row: dict, mentions: str) -> str:
+    event_date = display_date(row["_date"])
+    sheet_url = "https://docs.google.com/spreadsheets/d/1CH-JOlTq-PYzeRdsKL47XeftKD16Tt7UQyz4_JiGtEs/edit?usp=sharing"
     return f"""{mentions}
 お疲れ様です！
-今週のMUの鍵預かりの入力を<https://docs.google.com/spreadsheets/d/1CH-JOlTq-PYzeRdsKL47XeftKD16Tt7UQyz4_JiGtEs/edit?usp=sharing|こちら>にお願いします。
+今週のMUの鍵預かりの入力を<{sheet_url}|こちら>にお願いします。
 （出勤がなく受け取り・返却が厳しい場合は本日中にall-askで代わりを探すメッセージを送ってください。）
 当番の方、このメッセージの確認・シートの入力が終わりましたら「🔥」のリアクションをお願いいたします！
 また、当番でなくてもMU参加できるよって方はこのメッセージに「:fire:」のリアクションをお願いいたします！
@@ -86,7 +148,7 @@ def build_message(row: dict) -> str:
 また、鍵当番の方は木番のslack「#all-cypher-2026」の方にMUの宣伝をお願いします！
 例）
 お疲れ様です！
-今週のMUは{mu_date}に開催します🎉
+今週のMUは{event_date}に開催します🎉
 
 個人的に〇〇にハマっているのでこれについていっぱいお話しできたらなと思っています☺️
 （何か一言）
@@ -98,39 +160,26 @@ def build_message(row: dict) -> str:
 def main():
     spreadsheet_id = required_env("GOOGLE_SPREADSHEET_ID")
     sheet_name = os.environ.get("GOOGLE_SHEET_NAME", "MU当番")
-    run_date = target_date()
+    today = run_date()
     dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
 
-    service = sheets_service()
-    rows = [row for row in load_rows(service, spreadsheet_id, sheet_name) if row["date"] == run_date]
-    if not rows:
-        raise RuntimeError(f"No duty row found for {run_date}")
-    if len(rows) > 1:
-        raise RuntimeError(f"Multiple duty rows found for {run_date}")
+    sheet_service = sheets_service()
+    row = find_next_duty(load_rows(sheet_service, spreadsheet_id, sheet_name), today)
+    client = WebClient(token=required_env("SLACK_BOT_TOKEN"))
+    message = build_message(row, resolve_mentions(client, row))
 
-    row = rows[0]
-    if row.get("posted_at"):
-        print(f"Already posted for {run_date}: {row['posted_at']}")
-        return
-
-    message = build_message(row)
     if dry_run:
-        print("DRY RUN - message was not posted:\n")
+        print(f"DRY RUN - next duty date: {row['_date'].isoformat()}\n")
         print(message)
         return
 
-    client = WebClient(token=required_env("SLACK_BOT_TOKEN"))
     try:
         response = client.chat_postMessage(
-            channel=required_env("SLACK_CHANNEL_ID"),
-            text=message,
-            unfurl_links=False,
+            channel=required_env("SLACK_CHANNEL_ID"), text=message, unfurl_links=False
         )
     except SlackApiError as error:
         raise RuntimeError(f"Slack API error: {error.response.get('error')}") from error
-
-    update_posted_at(service, spreadsheet_id, sheet_name, row["_row_number"])
-    print(f"Posted reminder for {run_date}: {response['ts']}")
+    print(f"Posted reminder for {row['_date'].isoformat()}: {response['ts']}")
 
 
 if __name__ == "__main__":
