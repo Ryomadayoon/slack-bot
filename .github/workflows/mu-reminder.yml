@@ -1,0 +1,39 @@
+name: MU Slack Reminder
+
+on:
+  schedule:
+    # Every Sunday 09:00 JST (00:00 UTC)
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+    inputs:
+      run_date:
+        description: "Duty date in YYYY-MM-DD; blank means today in JST"
+        required: false
+        type: string
+      dry_run:
+        description: "Do not post to Slack"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mu-slack-reminder
+    env:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+      GOOGLE_SHEET_NAME: MU当番
+      RUN_DATE: ${{ inputs.run_date }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python reminder.py
