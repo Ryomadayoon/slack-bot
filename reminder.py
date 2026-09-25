@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from google.oauth2 import service_account
@@ -30,6 +30,9 @@ def run_date() -> date:
 
 
 def parse_date(value: str) -> date:
+    if isinstance(value, (int, float)):
+        # Google Sheets may return a date as its serial number.
+        return date(1899, 12, 30) + timedelta(days=int(value))
     match = re.search(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", value.strip())
     if not match:
         raise RuntimeError(f"Could not parse date: {value}")
@@ -52,7 +55,7 @@ def load_rows(service, spreadsheet_id: str, sheet_name: str):
     result = (
         service.spreadsheets()
         .values()
-        .get(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A:F")
+        .get(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A:Z")
         .execute()
     )
     values = result.get("values", [])
@@ -60,22 +63,26 @@ def load_rows(service, spreadsheet_id: str, sheet_name: str):
         raise RuntimeError(f"Sheet '{sheet_name}' is empty")
 
     rows = []
-    for raw in values[1:]:
-        # The sheet layout is fixed: A=日程, B=曜日, C〜E=担当1〜3, F=鍵預かり当番.
-        if not raw or not raw[0].strip():
+    for raw in values:
+        date_index = None
+        duty_date = None
+        for index, cell in enumerate(raw):
+            try:
+                duty_date = parse_date(cell)
+                date_index = index
+                break
+            except (RuntimeError, ValueError, TypeError):
+                continue
+        if date_index is None:
             continue
-        try:
-            duty_date = parse_date(raw[0])
-        except RuntimeError:
-            # Ignore a title/header row if the sheet contains one.
-            continue
+        # Read weekday, 担当1〜3, 鍵預かり当番 relative to the detected date cell.
         rows.append(
             {
-                "日程": raw[0].strip(),
-                "担当1": raw[2].strip() if len(raw) > 2 else "",
-                "担当2": raw[3].strip() if len(raw) > 3 else "",
-                "担当3": raw[4].strip() if len(raw) > 4 else "",
-                "鍵預かり当番": raw[5].strip() if len(raw) > 5 else "",
+                "日程": str(raw[date_index]).strip(),
+                "担当1": str(raw[date_index + 2]).strip() if len(raw) > date_index + 2 else "",
+                "担当2": str(raw[date_index + 3]).strip() if len(raw) > date_index + 3 else "",
+                "担当3": str(raw[date_index + 4]).strip() if len(raw) > date_index + 4 else "",
+                "鍵預かり当番": str(raw[date_index + 5]).strip() if len(raw) > date_index + 5 else "",
                 "_date": duty_date,
             }
         )
