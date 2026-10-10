@@ -184,23 +184,26 @@ def resolve_mentions(client: WebClient, row: dict) -> str:
 def build_message(row: dict, mentions: str) -> str:
     event_date = display_date(row["_date"])
     sheet_url = "https://docs.google.com/spreadsheets/d/1CH-JOlTq-PYzeRdsKL47XeftKD16Tt7UQyz4_JiGtEs/edit?usp=sharing"
+    form_url = "https://docs.google.com/forms/d/e/1FAIpQLSdWUtAilSuNQYpos1vi40GCEBPAurmelKsvikjMWPmAk2p-bw/viewform?usp=header"
     return f"""{mentions}
 お疲れ様です！
 今週のMUの鍵預かりの入力を<{sheet_url}|こちら>にお願いします。
 （出勤がなく受け取り・返却が厳しい場合は本日中にall-askで代わりを探すメッセージを送ってください。）
 当番の方、このメッセージの確認・シートの入力が終わりましたら「✅」のリアクションをお願いいたします！
-また、当番でなくてもMU参加できるよって方はこのメッセージに「:fire:」のリアクションをお願いいたします！
+また、当番でなくてもMU参加できるよって方は以下のフォームの送信をお願いいたします！
+{form_url}
 
 また、鍵当番の方は木番のslack「#all-cypher-2026」の方にMUの宣伝をお願いします！
 例）
 お疲れ様です！
 今週のMUは{event_date}に開催します🎉
 
-個人的に〇〇にハマっているのでこれについていっぱいお話しできたらなと思っています☺️
+個人的に〇〇にハマっているのでこれについていっぱいお話しできたらなと思っています😸
 （何か一言）
 
-みなさんでお菓子食べながらいっぱいお話ししましょー🍪
-参加できる方はこのメッセージに「:+1:」のリアクションお願いします！"""
+みなさんでお菓子食べながらいっぱいお話ししましょー🍿
+参加できる方はフォーム送ってください！
+{form_url}"""
 
 
 def main():
