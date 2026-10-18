@@ -206,15 +206,88 @@ def build_message(row: dict, mentions: str) -> str:
 {form_url}"""
 
 
+def previous_sunday_thread_ts(client: WebClient, channel_id: str, today: date) -> str:
+    previous_sunday = today - timedelta(days=3)
+    auth_response = client.auth_test()
+    bot_user_id = auth_response["user_id"]
+
+    oldest = datetime.combine(
+        previous_sunday, datetime.min.time(), tzinfo=JST
+    ).timestamp()
+    latest = datetime.combine(
+        today + timedelta(days=1), datetime.min.time(), tzinfo=JST
+    ).timestamp()
+
+    messages = []
+    cursor = None
+    while True:
+        params = {
+            "channel": channel_id,
+            "oldest": str(oldest),
+            "latest": str(latest),
+            "inclusive": True,
+            "limit": 100,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        response = client.conversations_history(**params)
+        messages.extend(response.get("messages", []))
+        cursor = response.get("response_metadata", {}).get("next_cursor") or None
+        if not cursor:
+            break
+
+    candidates = []
+    for message in messages:
+        message_ts = message.get("ts")
+        if not message_ts or message.get("user") != bot_user_id:
+            continue
+        if message.get("thread_ts") and message.get("thread_ts") != message_ts:
+            continue
+        posted_date = datetime.fromtimestamp(float(message_ts), JST).date()
+        if posted_date == previous_sunday:
+            candidates.append(message_ts)
+
+    if not candidates:
+        raise RuntimeError(
+            f"No Sunday reminder message found for {previous_sunday.isoformat()}"
+        )
+    return max(candidates, key=float)
+
+
+def post_wednesday_reply(client: WebClient, channel_id: str, thread_ts: str) -> str:
+    response = client.chat_postMessage(
+        channel=channel_id,
+        text="鍵当番忘れずにお願いします！",
+        thread_ts=thread_ts,
+        unfurl_links=False,
+    )
+    return response["ts"]
+
+
 def main():
     spreadsheet_id = required_env("GOOGLE_SPREADSHEET_ID")
     sheet_name = os.environ.get("GOOGLE_SHEET_NAME", "MU当番")
+    channel_id = required_env("SLACK_CHANNEL_ID")
     today = run_date()
     dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
+    client = WebClient(token=required_env("SLACK_BOT_TOKEN"))
+
+    if today.weekday() == 2:  # Wednesday
+        thread_ts = previous_sunday_thread_ts(client, channel_id, today)
+        reply = "鍵当番忘れずにお願いします！"
+        if dry_run:
+            print(f"DRY RUN - Wednesday reply to Sunday thread {thread_ts}\n")
+            print(reply)
+            return
+        try:
+            posted_ts = post_wednesday_reply(client, channel_id, thread_ts)
+        except SlackApiError as error:
+            raise RuntimeError(f"Slack API error: {error.response.get('error')}") from error
+        print(f"Posted Wednesday reply in thread {thread_ts}: {posted_ts}")
+        return
 
     sheet_service = sheets_service()
     row = find_next_duty(load_rows(sheet_service, spreadsheet_id, sheet_name), today)
-    client = WebClient(token=required_env("SLACK_BOT_TOKEN"))
     message = build_message(row, resolve_mentions(client, row))
 
     if dry_run:
@@ -224,7 +297,7 @@ def main():
 
     try:
         response = client.chat_postMessage(
-            channel=required_env("SLACK_CHANNEL_ID"), text=message, unfurl_links=False
+            channel=channel_id, text=message, unfurl_links=False
         )
     except SlackApiError as error:
         raise RuntimeError(f"Slack API error: {error.response.get('error')}") from error
